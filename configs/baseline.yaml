@@ -1,0 +1,26 @@
+# Robust statistical baseline: deviation from each host's own rolling median, in robust noise
+# units (rolling median absolute deviation of recent residuals). Simple enough to reason about.
+#
+#   uv run network-anomaly detect --input data/synthetic/demo.csv --config configs/baseline.yaml
+
+detector:
+  type: robust_zscore
+  # Each metric's directional |z| is divided by its 99th training percentile, so naturally spiky
+  # metrics (e.g. disk I/O during nightly backups) do not dominate the score.
+  normalisation_quantile: 0.99
+
+features:
+  local_window: 1h     # rolling-median baseline
+  scale_window: 1D     # history for the robust residual scale
+  calendar_tz: UTC     # time zone used for weekday/weekend comparisons
+
+threshold:
+  # 99.5th percentile of validation-period scores, per host where there is enough data.
+  # Assumes the validation period is representative of normal behaviour.
+  strategy: clean_quantile
+  quantile: 0.995
+  per_host: true
+
+split:
+  train_fraction: 0.5        # fit features and detector on the first half of the timeline
+  validation_fraction: 0.2   # calibrate the threshold on the next 20%

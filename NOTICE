@@ -1,0 +1,8 @@
+Network Anomaly Toolkit
+Copyright 2026 feurstern (https://github.com/feurstern)
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+Public datasets referenced by this toolkit are NOT redistributed with it. They are
+downloaded by the user from their official sources and remain subject to their own
+licences and citation requirements (see docs/datasets.md).

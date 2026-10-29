@@ -1,0 +1,37 @@
+# Python / tooling
+__pycache__/
+*.py[cod]
+.venv/
+build/
+dist/
+*.egg-info/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+
+# Datasets: never commit raw, processed or generated data (see data/README.md)
+data/raw/*
+data/processed/*
+data/synthetic/*
+!data/raw/.gitkeep
+!data/processed/.gitkeep
+!data/synthetic/.gitkeep
+
+# Generated artifacts
+reports/
+models/
+*.joblib
+*.pt
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store

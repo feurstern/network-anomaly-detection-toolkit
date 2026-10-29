@@ -1,0 +1,31 @@
+# Isolation Forest on host-normalised features: robust deviations from each host's rolling
+# (z_local) and same-time-of-week (z_season) baselines, plus the rate of change (roc).
+# One pooled model serves all hosts; raw levels and host IDs are never inputs.
+#
+#   uv run network-anomaly detect --input data/synthetic/demo.csv --config configs/isolation_forest.yaml
+
+detector:
+  type: isolation_forest
+  n_estimators: 200
+  max_samples: 256
+  random_state: 0          # fixed for reproducibility
+  feature_kinds: [z_local, z_season, roc]
+  # contamination: 0.01    # alternative to `threshold`: 99th percentile of training scores
+
+features:
+  local_window: 1h
+  scale_window: 1D
+  calendar_tz: UTC
+
+threshold:
+  strategy: clean_quantile   # quantile of validation-period scores; no labels needed
+  quantile: 0.995
+  per_host: true
+
+split:
+  train_fraction: 0.5
+  validation_fraction: 0.2
+
+alerting:
+  merge_gap: 2     # flagged points separated by <= 2 quiet intervals form one alert
+  min_points: 2    # an alert fires on its second flagged point

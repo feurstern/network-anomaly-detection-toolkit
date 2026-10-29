@@ -1,0 +1,4 @@
+timestamp,src_addr,dst_addr,src_port,dst_port,protocol,duration_ms,packets_fwd,packets_bwd,bytes_fwd,bytes_bwd,syn_count,ack_count,fin_count,rst_count,label
+2026-01-05T00:00:01.250Z,192.0.2.5,198.51.100.10,51514,443,tcp,120.5,6,5,820,4100,1,10,2,0,BENIGN
+2026-01-05T00:00:02Z,192.0.2.6,198.51.100.10,51515,443,tcp,98.0,5,4,760,3900,1,8,2,0,BENIGN
+2026-01-05T00:00:02.5Z,203.0.113.9,198.51.100.10,40001,80,tcp,0.4,1,0,60,0,1,0,0,0,PortScan
