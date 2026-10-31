@@ -9,7 +9,7 @@ import pandas as pd
 import pytest
 
 from network_anomaly.detectors.base import Detector
-from network_anomaly.errors import ArtifactError, ConfigError
+from network_anomaly.errors import ArtifactError, ConfigError, DataValidationError
 from network_anomaly.features.builder import FeatureFrame
 from network_anomaly.ingestion.validation import ValidatedMetrics, load_metrics
 from network_anomaly.pipelines import DetectionConfig, ModelBundle, apply_bundle, run_detection
@@ -19,10 +19,16 @@ FIVE_MINUTES = pd.Timedelta("5min")
 
 
 @pytest.fixture(scope="module")
-def validated(tmp_path_factory: pytest.TempPathFactory) -> ValidatedMetrics:
+def data_path(tmp_path_factory: pytest.TempPathFactory) -> Path:
     path = tmp_path_factory.mktemp("data") / "demo.csv"
-    write_dataset(generate_dataset(GeneratorConfig(seed=21, hosts=3, days=21)), path)
-    return load_metrics(path)
+    dataset = generate_dataset(GeneratorConfig(seed=21, hosts=3, days=21))
+    write_dataset(dataset, path, with_clean_twin=True)
+    return path
+
+
+@pytest.fixture(scope="module")
+def validated(data_path: Path) -> ValidatedMetrics:
+    return load_metrics(data_path)
 
 
 def _config(**fields: Any) -> DetectionConfig:
@@ -99,3 +105,26 @@ def test_corrupt_or_unknown_bundles_are_rejected(
         ModelBundle.load(tmp_path / "model")
     with pytest.raises(ArtifactError, match="cannot load model bundle"):
         ModelBundle.load(tmp_path / "nowhere")
+
+
+def test_known_clean_copy_calibrates_clean_quantile_on_its_validation_window(
+    validated: ValidatedMetrics, data_path: Path
+) -> None:
+    clean = load_metrics(data_path.with_name("demo.clean.csv"))
+    result = run_detection(validated, _config(), FIVE_MINUTES, clean=clean)
+    thresholds = result.bundle.thresholds
+    assert (thresholds.source, thresholds.fitted_on) == ("known_clean", "validation")
+    assert pd.Timestamp(thresholds.window_start) == result.bundle.split.train_end
+    assert pd.Timestamp(thresholds.window_end) == result.bundle.split.validation_end
+    assert run_detection(validated, _config(), FIVE_MINUTES).bundle.thresholds.source == "input"
+
+
+def test_a_known_clean_file_must_be_clean_and_only_serves_clean_quantile(
+    validated: ValidatedMetrics, data_path: Path
+) -> None:
+    with pytest.raises(DataValidationError, match="labelled anomalous"):
+        run_detection(validated, _config(), FIVE_MINUTES, clean=validated)
+    clean = load_metrics(data_path.with_name("demo.clean.csv"))
+    config = _config(threshold={"strategy": "target_fpr"})
+    with pytest.raises(ConfigError, match="only applies to clean_quantile"):
+        run_detection(validated, config, FIVE_MINUTES, clean=clean)

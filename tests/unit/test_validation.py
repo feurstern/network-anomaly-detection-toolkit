@@ -249,6 +249,14 @@ def test_grid_collision_and_irregular_timestamps(tmp_path: Path) -> None:
     assert _issue(report, "irregular_timestamps").lines == (8,)
 
 
+def test_a_constant_offset_from_the_clock_grid_is_regular(tmp_path: Path) -> None:
+    rows = [f"2026-01-05T00:{m + 2:02d}:00Z,a,1,1,0" for m in range(0, 50, 5)]  # :02, :07, ...
+    validated, report = _validate(_csv(tmp_path, *rows))
+    assert validated is not None
+    assert "irregular_timestamps" not in _codes(report)
+    assert _issue(report, "grid_phase_offset").severity == "info"
+
+
 def test_gaps_are_counted_per_entity(tmp_path: Path) -> None:
     rows = [f"2026-01-05T00:{m:02d}:00Z,a,1,1,0" for m in (0, 5, 10, 25, 30)]
     validated, report = _validate(_csv(tmp_path, *rows))

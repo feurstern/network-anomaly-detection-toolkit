@@ -14,7 +14,7 @@ from types import MappingProxyType
 import numpy as np
 import numpy.typing as npt
 
-from network_anomaly.schemas import CANONICAL_METRICS, DataQualityKind, EventSeverity
+from network_anomaly.schemas import HOST_METRICS, DataQualityKind, EventSeverity
 from network_anomaly.synthetic.system import Drivers, FloatArray, NoiseLevels
 
 BoolArray = npt.NDArray[np.bool_]
@@ -372,7 +372,7 @@ def schedule_events(
 # Data-quality problems
 # --------------------------------------------------------------------------------------------------
 
-METRIC_ORDER: tuple[str, ...] = tuple(spec.name for spec in CANONICAL_METRICS)
+METRIC_ORDER: tuple[str, ...] = HOST_METRICS
 
 
 @dataclass(frozen=True)

@@ -43,6 +43,13 @@ def harmonic_mean(precision: float | None, recall: float | None) -> float | None
     return 0.0 if total == 0 else 2 * precision * recall / total
 
 
+def ranking_scores(scores: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
+    """Scores for threshold-free metrics: unscored rows rank below every scored row."""
+    finite = np.isfinite(scores)
+    fill = float(np.min(scores[finite])) - 1.0 if finite.any() else 0.0
+    return np.where(finite, scores, fill)
+
+
 def point_metrics(
     labels: npt.NDArray[np.int8],
     flagged: npt.NDArray[np.bool_],
@@ -59,9 +66,7 @@ def point_metrics(
     recall = _ratio(tp, tp + fn)
     pr_auc = None
     if 0 < actual.sum() < len(actual):
-        finite = np.isfinite(scores)
-        fill = float(np.min(scores[finite])) - 1.0 if finite.any() else 0.0
-        pr_auc = float(average_precision_score(actual, np.where(finite, scores, fill)))
+        pr_auc = float(average_precision_score(actual, ranking_scores(scores)))
     return PointMetrics(
         rows=len(actual),
         scored=int(np.isfinite(scores).sum()),

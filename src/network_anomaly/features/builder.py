@@ -200,6 +200,16 @@ class FeatureFrame:
         )
 
 
+def feature_groups(columns: tuple[str, ...], metrics: tuple[str, ...]) -> dict[str, list[int]]:
+    """Positions of each metric's feature columns (named ``<metric>__<kind>``)."""
+    groups: dict[str, list[int]] = {metric: [] for metric in metrics}
+    for position, column in enumerate(columns):
+        metric = column.rsplit("__", 1)[0]
+        if metric in groups:
+            groups[metric].append(position)
+    return groups
+
+
 def _to_model_space(values: npt.NDArray[np.float64], spec: MetricSpec) -> npt.NDArray[np.float64]:
     return np.log1p(values) if spec.log_scale else values
 

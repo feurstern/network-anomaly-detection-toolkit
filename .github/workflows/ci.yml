@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    name: Python ${{ matrix.python }} (core install)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - name: Install (locked)
+        run: uv sync --locked --python ${{ matrix.python }}
+      - name: Format
+        run: uv run ruff format --check .
+      - name: Lint
+        run: uv run ruff check .
+      - name: Types
+        run: uv run mypy src
+      - name: Tests
+        env:
+          MPLBACKEND: Agg
+        run: uv run pytest -q
+
+  autoencoder:
+    name: Optional autoencoder (CPU PyTorch)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - name: Install with the torch extra (locked)
+        run: uv sync --locked --extra torch
+      - name: Autoencoder and detector contract tests
+        run: uv run pytest -q tests/unit/test_autoencoder.py tests/unit/test_detectors.py

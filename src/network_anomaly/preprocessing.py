@@ -16,7 +16,7 @@ import numpy.typing as npt
 import pandas as pd
 from pandas.tseries.frequencies import to_offset
 
-from network_anomaly.config import snap_interval
+from network_anomaly.config import interval_text, snap_interval
 from network_anomaly.errors import DataValidationError
 from network_anomaly.ingestion.validation import MetricsFrame
 from network_anomaly.schemas import TIMESTAMP_COLUMN
@@ -71,8 +71,8 @@ def regularize(frame: MetricsFrame, frequency: pd.Timedelta) -> GridFrame:
     collisions = data.duplicated([entity, TIMESTAMP_COLUMN], keep=False)
     if collisions.any():
         raise DataValidationError(
-            f"{int(collisions.sum())} observations share a {frequency} interval with another "
-            "observation of the same entity",
+            f"{int(collisions.sum())} observations share a {interval_text(frequency)} "
+            "interval with another observation of the same entity",
             hint="Aggregate them to one row per interval or use a shorter interval.",
         )
 

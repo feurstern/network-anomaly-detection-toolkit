@@ -19,7 +19,7 @@ never seen in the window, fall back to the global value.
 
 import math
 from datetime import datetime
-from typing import Annotated, Literal
+from typing import Annotated, ClassVar, Literal
 
 import numpy as np
 import numpy.typing as npt
@@ -80,6 +80,10 @@ class HostThresholds(StrictModel):
     hosts_using_global: tuple[str, ...] = ()
     n_samples: int = 0
     params: dict[str, float | bool] = Field(default_factory=dict)
+    source: Literal["input", "known_clean"] = Field(
+        default="input",
+        description="'known_clean' when fitted on a separate known-clean copy of the window.",
+    )
 
     def thresholds_for(self, entities: ObjectArray) -> FloatArray:
         mapped = pd.Series(entities, dtype=object).map(self.per_host)
@@ -93,6 +97,43 @@ class HostThresholds(StrictModel):
     def apply(self, scores: FloatArray, entities: ObjectArray) -> BoolArray:
         """Flag rows whose score reaches their threshold; NaN scores are never flagged."""
         return np.isfinite(scores) & (scores >= self.thresholds_for(entities))
+
+
+class ScoreReference(StrictModel):
+    """Compact summary of the scores in a reference window, for describing how rare a score is.
+
+    Stores the percentiles of the window plus its top tail exactly (the highest 1 %, at most
+    ``MAX_TAIL`` values), so frequencies are exact where alerts live. ``exceedance`` is an empirical
+    frequency in that window - not a probability, and inflated if the window held anomalies.
+    """
+
+    TAIL_SHARE: ClassVar[float] = 0.01
+    MAX_TAIL: ClassVar[int] = 2000
+
+    window: str
+    n: int = Field(gt=0)
+    percentiles: tuple[float, ...] = Field(description="Scores at 0, 1, ..., 100 percent.")
+    tail: tuple[float, ...] = Field(description="Largest scores, ascending.")
+
+    @classmethod
+    def from_scores(cls, scores: FloatArray, window: str) -> "ScoreReference | None":
+        values = np.sort(scores[np.isfinite(scores)])
+        if values.size == 0:
+            return None
+        size = min(cls.MAX_TAIL, max(1, math.ceil(cls.TAIL_SHARE * values.size)))
+        return cls(
+            window=window,
+            n=int(values.size),
+            percentiles=tuple(float(v) for v in np.quantile(values, np.linspace(0, 1, 101))),
+            tail=tuple(float(v) for v in values[-size:]),
+        )
+
+    def exceedance(self, score: float) -> float:
+        """Share of reference scores >= ``score``."""
+        if score >= self.tail[0]:
+            return int(np.sum(np.asarray(self.tail) >= score)) / self.n
+        levels = np.linspace(0, 1, 101)
+        return float(1.0 - np.interp(score, self.percentiles, levels, left=0.0))
 
 
 def _quantile(values: FloatArray, q: float) -> float:
@@ -120,7 +161,7 @@ def fit_thresholds(
     expected = CALIBRATION_ROLE[config.strategy]
     if expected is not None and role != expected:
         raise ConfigError(f"{config.strategy} thresholds are fitted on {expected} data, not {role}")
-    window_fields = {"window_start": window[0], "window_end": window[1]} if window else {}
+    window_start, window_end = window if window else (None, None)
     if isinstance(config, FixedThresholdConfig):
         return HostThresholds(
             strategy="fixed",
@@ -168,5 +209,6 @@ def fit_thresholds(
         hosts_using_global=tuple(using_global),
         n_samples=int(values.size),
         params=params,
-        **window_fields,
+        window_start=window_start,
+        window_end=window_end,
     )

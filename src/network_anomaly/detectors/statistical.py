@@ -13,7 +13,7 @@ import numpy as np
 from pydantic import Field, field_validator
 
 from network_anomaly.config import StrictModel
-from network_anomaly.detectors.base import BoolArray, Detector, FloatArray
+from network_anomaly.detectors.base import BoolArray, Detector, FloatArray, IntArray
 from network_anomaly.errors import ArtifactError, ConfigError
 from network_anomaly.features.builder import FeatureFrame
 from network_anomaly.schemas import Direction, metric_spec
@@ -63,6 +63,10 @@ class StaticThresholdDetector(Detector):
         super().__init__(config or StaticThresholdConfig())
         self.limits: dict[str, float] = {}
 
+    @property
+    def input_metrics(self) -> tuple[str, ...]:
+        return tuple(m for m in self.metrics if m in self.limits)
+
     def _fit(self, ff: FeatureFrame, rows: BoolArray) -> None:
         self.limits = {m: v for m, v in self.config.limits.items() if m in ff.metrics}
         if not self.limits:
@@ -71,15 +75,20 @@ class StaticThresholdDetector(Detector):
                 hint=f"Limits are set for {sorted(self.config.limits)}.",
             )
 
-    def _score(self, ff: FeatureFrame, rows: BoolArray) -> FloatArray:
-        ratios = np.column_stack(
-            [
-                ff.context[f"{metric}__value"].to_numpy(dtype=np.float64)[rows] / limit
-                for metric, limit in self.limits.items()
-            ]
+    def _ratios(self, ff: FeatureFrame, rows: BoolArray | IntArray) -> FloatArray:
+        """(rows x metrics) value / limit; NaN for metrics without a limit or a value."""
+        values = np.column_stack(
+            [ff.context[f"{m}__value"].to_numpy(dtype=np.float64)[rows] for m in self.metrics]
         )
+        ratios: FloatArray = values / np.array([self.limits.get(m, np.nan) for m in self.metrics])
+        return ratios
+
+    def _score(self, ff: FeatureFrame, rows: BoolArray) -> FloatArray:
         # fmax ignores missing metrics; a row with every limited metric missing stays NaN.
-        return np.fmax.reduce(ratios, axis=1)
+        return np.fmax.reduce(self._ratios(ff, rows), axis=1)
+
+    def metric_terms(self, ff: FeatureFrame, positions: IntArray) -> FloatArray | None:
+        return self._ratios(ff, positions)
 
     def _state(self, directory: Path) -> None:
         (directory / STATE_FILE).write_text(json.dumps({"limits": self.limits}, indent=2) + "\n")
@@ -124,7 +133,7 @@ class RobustZScoreDetector(Detector):
         super().__init__(config or RobustZScoreConfig())
         self.normalisers: dict[str, float] = {}
 
-    def directional(self, ff: FeatureFrame, rows: BoolArray) -> FloatArray:
+    def directional(self, ff: FeatureFrame, rows: BoolArray | IntArray) -> FloatArray:
         """(rows x metrics) deviations that count, clipped at zero for the ignored direction."""
         z = self.matrix(ff, rows)
         columns = []
@@ -151,9 +160,16 @@ class RobustZScoreDetector(Detector):
             self.normalisers[metric] = max(learned, 1.0)
 
     def _score(self, ff: FeatureFrame, rows: BoolArray) -> FloatArray:
-        normalisers = np.array([self.normalisers[m] for m in self.metrics])
-        result: FloatArray = (self.directional(ff, rows) / normalisers).max(axis=1)
+        result: FloatArray = self._terms(ff, rows).max(axis=1)
         return result
+
+    def _terms(self, ff: FeatureFrame, rows: BoolArray | IntArray) -> FloatArray:
+        normalisers = np.array([self.normalisers[m] for m in self.metrics])
+        terms: FloatArray = self.directional(ff, rows) / normalisers
+        return terms
+
+    def metric_terms(self, ff: FeatureFrame, positions: IntArray) -> FloatArray | None:
+        return self._terms(ff, positions)
 
     def _state(self, directory: Path) -> None:
         state = {"normalisers": self.normalisers}

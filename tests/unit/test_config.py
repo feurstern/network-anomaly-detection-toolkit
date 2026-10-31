@@ -3,7 +3,13 @@ from pathlib import Path
 import pytest
 from pydantic import Field, ValidationError
 
-from network_anomaly.config import StrictModel, load_yaml_config, parse_config
+from network_anomaly.config import (
+    StrictModel,
+    interval_text,
+    load_yaml_config,
+    parse_config,
+    parse_frequency,
+)
 from network_anomaly.errors import ConfigError, ExitCode
 
 
@@ -82,3 +88,12 @@ def test_parsed_configs_are_immutable() -> None:
 def test_config_errors_exit_with_code_4() -> None:
     assert ConfigError.exit_code is ExitCode.CONFIG
     assert int(ExitCode.CONFIG) == 4
+
+
+@pytest.mark.parametrize(
+    ("interval", "text"),
+    [("5min", "5min"), ("1min", "1min"), ("1h", "1h"), ("1D", "1D"), ("90s", "90s")],
+)
+def test_interval_text_round_trips_through_parse_frequency(interval: str, text: str) -> None:
+    assert interval_text(parse_frequency(interval)) == text
+    assert parse_frequency(text) == parse_frequency(interval)

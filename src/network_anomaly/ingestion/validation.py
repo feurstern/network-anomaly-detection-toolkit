@@ -19,7 +19,7 @@ import numpy.typing as npt
 import pandas as pd
 from pandas.tseries.frequencies import to_offset
 
-from network_anomaly.config import snap_interval
+from network_anomaly.config import interval_text, snap_interval
 from network_anomaly.errors import DataValidationError
 from network_anomaly.ingestion.readers import MISSING_TOKENS, RawTable, read_csv_strings
 from network_anomaly.schemas import (
@@ -437,14 +437,29 @@ def _check_grid(
 ) -> pd.Series:
     """Report off-grid timestamps and grid-cell collisions; return the grid-rounded timestamps."""
     rounded = data[TIMESTAMP_COLUMN].dt.round(to_offset(frequency))
-    offset_seconds = (data[TIMESTAMP_COLUMN] - rounded).dt.total_seconds().abs().to_numpy()
-    irregular = offset_seconds > _IRREGULAR_FRACTION * frequency.total_seconds()
+    interval = interval_text(frequency)
+    offset = (data[TIMESTAMP_COLUMN] - rounded).dt.total_seconds()
+    # Jitter is measured around each entity's typical offset: a series sampled regularly at
+    # :02, :07, ... is regular, just not aligned with the clock.
+    phase = offset.groupby(data[entity_column]).transform("median")
+    limit = _IRREGULAR_FRACTION * frequency.total_seconds()
+    irregular = ((offset - phase).abs() > limit).to_numpy()
     lines = data[_LINE].to_numpy(dtype=np.int64)
+    shifted = (phase.abs() > limit).to_numpy()
+    if shifted.any():
+        log.add(
+            "grid_phase_offset",
+            "info",
+            f"timestamps are regular but offset from the clock-aligned {interval} grid by up to "
+            f"{phase.abs().max():.0f}s; they are placed on the nearest grid point",
+            column=TIMESTAMP_COLUMN,
+            n_affected=int(shifted.sum()),
+        )
     if irregular.any():
         log.add(
             "irregular_timestamps",
             "warning",
-            f"timestamps more than {_IRREGULAR_FRACTION:.0%} of the {frequency} interval away "
+            f"timestamps more than {_IRREGULAR_FRACTION:.0%} of the {interval} interval away "
             "from the regular grid",
             column=TIMESTAMP_COLUMN,
             lines=lines[irregular],
@@ -457,7 +472,7 @@ def _check_grid(
         log.add(
             "grid_collision",
             "error",
-            f"several observations of the same entity fall into one {frequency} interval",
+            f"several observations of the same entity fall into one {interval} interval",
             column=TIMESTAMP_COLUMN,
             lines=lines[collisions.to_numpy(dtype=bool)],
             hint="Aggregate them to one row per interval, or pass a shorter interval with --freq.",

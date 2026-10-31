@@ -1,0 +1,24 @@
+# Optional autoencoder (needs the CPU-only PyTorch extra: uv sync --extra torch).
+# Anomaly score = mean squared reconstruction error of the host-normalised features.
+#
+#   uv run network-anomaly detect --input data/synthetic/demo.csv --config configs/autoencoder.yaml
+
+detector:
+  type: autoencoder
+  hidden_units: 32
+  bottleneck: 8               # narrower = less able to reconstruct unusual rows
+  epochs: 60
+  batch_size: 256
+  learning_rate: 0.001
+  validation_fraction: 0.1    # last 10% of the training window, for early stopping only
+  patience: 6
+  random_state: 0
+  feature_kinds: [z_local, z_season, roc]
+
+threshold:
+  strategy: clean_quantile
+  quantile: 0.995
+
+split:
+  train_fraction: 0.5
+  validation_fraction: 0.2

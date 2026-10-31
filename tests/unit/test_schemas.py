@@ -4,9 +4,11 @@ from pydantic import ValidationError
 from network_anomaly.schemas import (
     CANONICAL_METRICS,
     DEFAULT_ENTITY_COLUMN,
+    FLOW_AGGREGATE_METRICS,
     FLOW_FIELD_REGISTRY,
     FLOW_FIELDS,
     FLOW_VOLUME_FIELDS,
+    HOST_METRICS,
     LABEL_COLUMNS,
     METRIC_REGISTRY,
     TIMESTAMP_COLUMN,
@@ -34,7 +36,8 @@ DOCUMENTED_METRICS = {
 
 
 def test_registry_covers_exactly_the_documented_metrics() -> None:
-    assert set(METRIC_REGISTRY) == DOCUMENTED_METRICS
+    assert set(HOST_METRICS) == DOCUMENTED_METRICS
+    assert set(METRIC_REGISTRY) == DOCUMENTED_METRICS | set(FLOW_AGGREGATE_METRICS)
     assert len(CANONICAL_METRICS) == len(METRIC_REGISTRY)
 
 

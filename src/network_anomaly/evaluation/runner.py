@@ -12,10 +12,12 @@ was fitted on them); it is refused unless explicitly allowed and is then labelle
 import json
 import logging
 from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import numpy as np
+import numpy.typing as npt
 import pandas as pd
 from pandas.tseries.frequencies import to_offset
 from pydantic import AwareDatetime
@@ -23,13 +25,19 @@ from pydantic import AwareDatetime
 from network_anomaly.config import StrictModel
 from network_anomaly.errors import ArtifactError, ConfigError, DataValidationError, LeakageError
 from network_anomaly.evaluation.events import (
+    EventMatch,
     EventMatchingConfig,
     EventMetrics,
     event_window,
     match_events,
 )
 from network_anomaly.evaluation.point import PointMetrics, point_metrics
-from network_anomaly.explanations.alerts import AlertingConfig, build_alert_intervals
+from network_anomaly.explanations.alerts import (
+    AlertingConfig,
+    AlertInterval,
+    build_alert_intervals,
+)
+from network_anomaly.features.builder import FeatureFrame
 from network_anomaly.ingestion.events import read_events, sibling_path
 from network_anomaly.ingestion.validation import LabelFrame, load_metrics
 from network_anomaly.pipelines import DetectionResult, align_labels
@@ -127,6 +135,16 @@ def _segment_window(
     return min(starts), max(ends)
 
 
+@dataclass(frozen=True)
+class EvaluationOutcome:
+    """An evaluation report plus the details behind it (for reports and plots)."""
+
+    report: EvaluationReport
+    matches: list[EventMatch]
+    alerts: list[AlertInterval]  # built over the whole timeline
+    selected: npt.NDArray[np.bool_]  # table rows that entered the point metrics
+
+
 def evaluate_table(
     table: pd.DataFrame,
     events: Sequence[Event],
@@ -140,6 +158,32 @@ def evaluate_table(
     matching: EventMatchingConfig | None = None,
 ) -> EvaluationReport:
     """Point and event metrics for the rows of ``segments``."""
+    return assess_table(
+        table,
+        events,
+        detector=detector,
+        split=split,
+        frequency=frequency,
+        segments=segments,
+        allow_in_sample=allow_in_sample,
+        alerting=alerting,
+        matching=matching,
+    ).report
+
+
+def assess_table(
+    table: pd.DataFrame,
+    events: Sequence[Event],
+    *,
+    detector: str,
+    split: dict[str, str],
+    frequency: pd.Timedelta,
+    segments: Sequence[str] = ("test",),
+    allow_in_sample: bool = False,
+    alerting: AlertingConfig | None = None,
+    matching: EventMatchingConfig | None = None,
+) -> EvaluationOutcome:
+    """Like :func:`evaluate_table`, keeping event matches, alerts and the evaluated rows."""
     unknown = [s for s in segments if s not in SEGMENT_ORDER]
     if unknown or not segments:
         raise ConfigError(f"unknown segment(s) {unknown}; choose from {', '.join(SEGMENT_ORDER)}")
@@ -182,7 +226,7 @@ def evaluate_table(
         )
     normal_scored = selected & table["scored"].to_numpy(dtype=bool) & ~in_any_window
     normal_host_days = float(normal_scored.sum()) * frequency / pd.Timedelta(days=1)
-    event_metrics, _ = match_events(
+    event_metrics, matches = match_events(
         events,
         alerts,
         window_start=window_start,
@@ -191,7 +235,7 @@ def evaluate_table(
         config=matching,
         normal_host_days=normal_host_days,
     )
-    return EvaluationReport(
+    report = EvaluationReport(
         detector=detector,
         segments=ordered,
         in_sample=in_sample,
@@ -203,26 +247,39 @@ def evaluate_table(
         point=point,
         events=event_metrics,
     )
+    return EvaluationOutcome(report, matches, alerts, selected)
+
+
+def evaluation_table(
+    ff: FeatureFrame,
+    scores: npt.NDArray[np.float64],
+    flagged: npt.NDArray[np.bool_],
+    segments: npt.NDArray[np.object_],
+    labels: npt.NDArray[np.int8],
+) -> pd.DataFrame:
+    """Evaluation table for in-memory scores (observed rows only)."""
+    table = pd.DataFrame(
+        {
+            "entity": ff.entities,
+            "time": ff.timestamps.reset_index(drop=True),
+            "segment": segments,
+            "scored": np.isfinite(scores),
+            "score": scores,
+            "flagged": flagged,
+            "is_anomaly": labels,
+        }
+    )
+    return table.loc[ff.observed].reset_index(drop=True)
 
 
 def table_from_result(result: DetectionResult, labels: LabelFrame | None) -> pd.DataFrame:
     """Evaluation table for an in-memory detection result (observed rows only)."""
-    ff = result.features
-    aligned = align_labels(ff, labels)
+    aligned = align_labels(result.features, labels)
     if aligned is None:
         raise DataValidationError("evaluation needs an is_anomaly label column")
-    table = pd.DataFrame(
-        {
-            "entity": ff.entities,
-            "time": ff.timestamps.to_numpy(),
-            "segment": result.segments,
-            "scored": np.isfinite(result.scores),
-            "score": result.scores,
-            "flagged": result.flagged,
-            "is_anomaly": aligned,
-        }
+    return evaluation_table(
+        result.features, result.scores, result.flagged, result.segments, aligned
     )
-    return table.loc[ff.observed].reset_index(drop=True)
 
 
 _DETECTION_COLUMNS = ("timestamp", "segment", "status", "score", "is_flagged")
@@ -251,17 +308,30 @@ def read_detections(path: Path) -> tuple[pd.DataFrame, dict[str, Any]]:
     return frame, meta
 
 
-def evaluate_files(
-    data_path: Path,
-    predictions_path: Path,
-    *,
-    events_path: Path | None = None,
-    segments: Sequence[str] = ("test",),
-    allow_in_sample: bool = False,
-    alerting: AlertingConfig | None = None,
-    matching: EventMatchingConfig | None = None,
-) -> EvaluationReport:
-    """Evaluate a detections CSV against the labelled input it was computed from."""
+@dataclass(frozen=True)
+class EvaluationInputs:
+    """A detections file joined to its labelled input: one row per observed input row."""
+
+    table: pd.DataFrame  # entity, time, segment, scored, score, threshold, flagged, is_anomaly
+    metric_values: pd.DataFrame  # metric columns, row-aligned with ``table``
+    events: list[Event]
+    meta: dict[str, Any]  # the detections' .meta.json
+    frequency: pd.Timedelta
+
+    @property
+    def detector(self) -> str:
+        return str(self.meta["detector"]["name"])
+
+    @property
+    def saved_alerting(self) -> AlertingConfig | None:
+        saved = self.meta.get("alerting")
+        return AlertingConfig.model_validate(saved) if saved else None
+
+
+def load_evaluation_inputs(
+    data_path: Path, predictions_path: Path, *, events_path: Path | None = None
+) -> EvaluationInputs:
+    """Join a detections CSV to the labelled input it was computed from."""
     detections, meta = read_detections(predictions_path)
     entity = meta.get("entity_column", "host_id")
     frequency = pd.Timedelta(seconds=float(meta["features"]["frequency_seconds"]))
@@ -287,6 +357,9 @@ def evaluate_files(
             "segment": joined["segment"],
             "scored": joined["status"].eq("scored"),
             "score": joined["score"].astype(np.float64),
+            "threshold": joined["threshold"].astype(np.float64)
+            if "threshold" in joined
+            else np.nan,
             "flagged": joined["is_flagged"].astype(bool),
             "is_anomaly": joined["is_anomaly"].astype(np.int8),
         }
@@ -294,6 +367,8 @@ def evaluate_files(
     for column in ("anomaly_event_id", "anomaly_scenario"):
         if column in joined:
             table[column] = joined[column]
+    metric_names = [m for m in validated.metrics.metrics if m in joined.columns]
+    metric_values = joined[metric_names].astype(np.float64)
     if events_path is None and sibling_path(data_path, "events.csv").is_file():
         events_path = sibling_path(data_path, "events.csv")
     if events_path is not None:
@@ -302,16 +377,47 @@ def evaluate_files(
     else:
         events = events_from_labels(table, frequency)
         logger.info("reconstructed events from labels", extra={"events": len(events)})
-    saved_alerting = meta.get("alerting")
-    return evaluate_table(
-        table,
-        events,
-        detector=str(meta["detector"]["name"]),
-        split=meta["split"],
-        frequency=frequency,
+    return EvaluationInputs(table, metric_values, events, meta, frequency)
+
+
+def evaluate_inputs(
+    inputs: EvaluationInputs,
+    *,
+    segments: Sequence[str] = ("test",),
+    allow_in_sample: bool = False,
+    alerting: AlertingConfig | None = None,
+    matching: EventMatchingConfig | None = None,
+) -> EvaluationOutcome:
+    """Evaluate joined inputs; alerting defaults to the configuration ``detect`` used."""
+    return assess_table(
+        inputs.table,
+        inputs.events,
+        detector=inputs.detector,
+        split=inputs.meta["split"],
+        frequency=inputs.frequency,
         segments=segments,
         allow_in_sample=allow_in_sample,
-        alerting=alerting
-        or (AlertingConfig.model_validate(saved_alerting) if saved_alerting else None),
+        alerting=alerting or inputs.saved_alerting,
         matching=matching,
     )
+
+
+def evaluate_files(
+    data_path: Path,
+    predictions_path: Path,
+    *,
+    events_path: Path | None = None,
+    segments: Sequence[str] = ("test",),
+    allow_in_sample: bool = False,
+    alerting: AlertingConfig | None = None,
+    matching: EventMatchingConfig | None = None,
+) -> EvaluationReport:
+    """Evaluate a detections CSV against the labelled input it was computed from."""
+    inputs = load_evaluation_inputs(data_path, predictions_path, events_path=events_path)
+    return evaluate_inputs(
+        inputs,
+        segments=segments,
+        allow_in_sample=allow_in_sample,
+        alerting=alerting,
+        matching=matching,
+    ).report

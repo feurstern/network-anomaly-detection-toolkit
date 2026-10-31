@@ -76,7 +76,7 @@ def test_masked_cells_travel_with_their_rows() -> None:
 
 def test_two_observations_in_one_interval_are_rejected() -> None:
     frame = _frame([("2026-01-05T00:00:00Z", "a", 1.0), ("2026-01-05T00:01:00Z", "a", 2.0)])
-    with pytest.raises(DataValidationError, match="share a 0 days 00:05:00 interval"):
+    with pytest.raises(DataValidationError, match="share a 5min interval"):
         regularize(frame, FIVE_MINUTES)
 
 

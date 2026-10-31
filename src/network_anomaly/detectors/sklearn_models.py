@@ -106,9 +106,12 @@ class IsolationForestDetector(_SklearnDetector):
         ).fit(features)
 
     def _score(self, ff: FeatureFrame, rows: BoolArray) -> FloatArray:
+        return self.score_features(self.matrix(ff, rows))
+
+    def score_features(self, features: FloatArray) -> FloatArray:
         if self.model is None:
             raise NotFittedError("isolation forest is not fitted")
-        scores: FloatArray = -self.model.score_samples(compress(self.matrix(ff, rows)))
+        scores: FloatArray = -self.model.score_samples(compress(features))
         return scores
 
     def _state(self, directory: Path) -> None:
@@ -163,10 +166,12 @@ class OneClassSVMDetector(_SklearnDetector):
         )
 
     def _score(self, ff: FeatureFrame, rows: BoolArray) -> FloatArray:
+        return self.score_features(self.matrix(ff, rows))
+
+    def score_features(self, features: FloatArray) -> FloatArray:
         if self.model is None or self.scaler is None:
             raise NotFittedError("one-class svm is not fitted")
-        features = self.scaler.transform(compress(self.matrix(ff, rows)))
-        scores: FloatArray = -self.model.score_samples(features)
+        scores: FloatArray = -self.model.score_samples(self.scaler.transform(compress(features)))
         return scores
 
     def _state(self, directory: Path) -> None:

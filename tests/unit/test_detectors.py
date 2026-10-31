@@ -1,5 +1,6 @@
 """Contract tests that every detector must pass."""
 
+import importlib.util
 from collections.abc import Callable
 from pathlib import Path
 
@@ -32,7 +33,13 @@ from network_anomaly.schemas import TIMESTAMP_COLUMN
 
 FIVE_MINUTES = pd.Timedelta("5min")
 TRAIN_END = pd.Timestamp("2026-01-07T00:00:00Z")
-DETECTORS = sorted(DETECTOR_TYPES)
+HAS_TORCH = importlib.util.find_spec("torch") is not None
+DETECTORS = [
+    pytest.param(name, marks=pytest.mark.skipif(not HAS_TORCH, reason="needs the torch extra"))
+    if name == "autoencoder"
+    else name
+    for name in sorted(DETECTOR_TYPES)
+]
 
 
 def _frames(metrics: MetricsFrame) -> tuple[FeatureFrame, FeatureFrame]:

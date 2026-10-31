@@ -4,8 +4,8 @@ Nothing under `data/` except this file and the `.gitkeep` placeholders is ever c
 
 | Directory | Contents | How it is produced |
 |---|---|---|
-| `data/raw/` | Public datasets exactly as downloaded (zip/CSV/JSON) | Fetched by the user from the official source; checksums verified |
-| `data/processed/` | Public datasets converted to the toolkit's canonical schema | Derived from `data/raw/` by the toolkit |
+| `data/raw/` | Public datasets exactly as downloaded (zip/CSV/JSON) | `network-anomaly datasets download <name>` (pinned files, checksums verified) |
+| `data/processed/` | Public datasets converted to the toolkit's canonical schema | `network-anomaly datasets prepare <name>` |
 | `data/synthetic/` | Synthetic datasets with ground-truth labels and metadata | `network-anomaly generate` (deterministic from the seed) |
 
 ## Rules

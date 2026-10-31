@@ -29,8 +29,13 @@ dependencies = [
     "pydantic>=2.14.1",
     "pyyaml>=6.0.3",
     "scikit-learn>=1.9.1",
+    "threadpoolctl>=3.6",
     "typer>=0.27.3",
 ]
+
+[project.optional-dependencies]
+# Optional autoencoder detector. CPU-only builds come from the PyTorch index configured below.
+torch = ["torch>=2.15"]
 
 [project.urls]
 Author = "https://github.com/feurstern"
@@ -44,6 +49,15 @@ build-backend = "uv_build"
 
 [tool.uv.build-backend]
 module-name = "network_anomaly"
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cpu" }]
+
+[[tool.uv.index]]
+# CPU-only PyTorch wheels (no CUDA libraries); used only for the `torch` extra.
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
 
 [tool.ruff]
 line-length = 100
@@ -85,7 +99,7 @@ strict_equality = true
 extra_checks = true
 
 [[tool.mypy.overrides]]
-module = ["sklearn.*", "joblib.*"]
+module = ["sklearn.*", "joblib.*", "threadpoolctl.*"]
 ignore_missing_imports = true
 
 [tool.pydantic-mypy]

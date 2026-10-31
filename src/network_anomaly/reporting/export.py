@@ -1,4 +1,4 @@
-"""Machine-readable outputs: the detections CSV and its JSON provenance sidecar.
+"""Machine-readable outputs: the detections CSV, its JSON provenance sidecar and the alerts JSONL.
 
 The CSV has one row per *observed* input row (gap rows are internal), keyed by the original
 timestamp and entity so it can be joined back to the input and its labels:
@@ -8,6 +8,9 @@ timestamp and entity so it can be joined back to the input and its labels:
 * ``segment`` - train / validation / test; train and validation rows are in-sample.
 * ``status`` - ``scored``, ``warmup`` (baseline not ready yet) or ``no_data``.
 * ``score`` - unitless, higher = more anomalous, not a probability; empty when not scored.
+
+Alerts are written as JSON Lines, one :class:`~network_anomaly.schemas.Alert` per line, ordered by
+firing time.
 """
 
 import hashlib
@@ -18,12 +21,14 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
+from pydantic import ValidationError
 
 from network_anomaly import __version__
+from network_anomaly.errors import ArtifactError
 from network_anomaly.ingestion.events import sibling_path
 from network_anomaly.pipelines import DetectionResult
 from network_anomaly.preprocessing import SOURCE_TIMESTAMP
-from network_anomaly.schemas import TIMESTAMP_COLUMN
+from network_anomaly.schemas import TIMESTAMP_COLUMN, Alert
 
 SCORE_DECIMALS = 6
 
@@ -114,3 +119,29 @@ def write_detections(
     meta = detection_metadata(result, input_path)
     meta_path.write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
     return path, meta_path
+
+
+def write_alerts(alerts: list[Alert], path: Path) -> Path:
+    """Write alerts as JSON Lines (an empty file when there are none)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8", newline="\n") as handle:
+        for alert in alerts:
+            handle.write(alert.model_dump_json() + "\n")
+    return path
+
+
+def read_alerts(path: Path) -> list[Alert]:
+    """Read alerts written by :func:`write_alerts`."""
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError as exc:
+        raise ArtifactError(f"cannot read alerts {path}: {exc}") from exc
+    alerts = []
+    for number, line in enumerate(lines, start=1):
+        if not line.strip():
+            continue
+        try:
+            alerts.append(Alert.model_validate_json(line))
+        except ValidationError as exc:
+            raise ArtifactError(f"{path}:{number}: not an alert record: {exc}") from exc
+    return alerts

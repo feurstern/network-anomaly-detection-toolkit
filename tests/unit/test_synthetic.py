@@ -11,7 +11,7 @@ from network_anomaly.config import parse_config
 from network_anomaly.errors import ConfigError
 from network_anomaly.ingestion.events import read_events, sibling_path
 from network_anomaly.ingestion.validation import load_metrics
-from network_anomaly.schemas import METRIC_REGISTRY
+from network_anomaly.schemas import HOST_METRICS, METRIC_REGISTRY
 from network_anomaly.synthetic.generator import (
     DECIMALS,
     GeneratorConfig,
@@ -106,7 +106,8 @@ def test_labels_cover_every_visible_effect(small: SyntheticDataset) -> None:
     """Outside labelled rows the injected effect stays within one noise standard deviation."""
     sigma_by_host = {h["host_id"]: h["noise_sigma"] for h in small.metadata["hosts"]}
     normal = small.data["is_anomaly"].to_numpy() == 0
-    for metric, spec in METRIC_REGISTRY.items():
+    for metric in HOST_METRICS:
+        spec = METRIC_REGISTRY[metric]
         anomalous = small.data[metric].to_numpy()
         clean = small.clean[metric].to_numpy()
         # Written values are rounded, which can move a just-below-threshold effect slightly.
@@ -184,7 +185,7 @@ def test_generated_files_validate_cleanly(tmp_path: Path, small: SyntheticDatase
         validated = load_metrics(paths[name])
         assert validated.report.is_valid
         assert not validated.report.warnings, validated.report.warnings
-        assert validated.metrics.metrics == tuple(METRIC_REGISTRY)
+        assert validated.metrics.metrics == HOST_METRICS
 
 
 def test_metadata_records_parameters_and_checksums(tmp_path: Path, small: SyntheticDataset) -> None:

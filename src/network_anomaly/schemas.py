@@ -43,6 +43,7 @@ class MetricFamily(StrEnum):
     DISK = "disk"
     NETWORK = "network"
     CONNECTIONS = "connections"
+    FLOWS = "flows"
     GENERIC = "generic"
 
 
@@ -243,10 +244,77 @@ CANONICAL_METRICS: tuple[MetricSpec, ...] = (
         critical=True,
         min_scale=0.001,
     ),
+    # Network-flow aggregates per time window (see network_anomaly.flows).
+    _volume(
+        "flows_per_second",
+        "flows/s",
+        "Flow records starting in the window, per second.",
+        MetricFamily.FLOWS,
+        direction="both",
+        critical=False,
+        min_scale=0.03,
+    ),
+    _volume(
+        "flow_packets_per_second",
+        "packets/s",
+        "Packets of the window's flows, per second.",
+        MetricFamily.FLOWS,
+        direction="both",
+        critical=False,
+        min_scale=0.03,
+    ),
+    _volume(
+        "flow_bytes_per_second",
+        "bytes/s",
+        "Bytes of the window's flows, per second.",
+        MetricFamily.FLOWS,
+        direction="both",
+        critical=False,
+        min_scale=0.03,
+    ),
+    _volume(
+        "unique_sources",
+        "sources",
+        "Distinct source identifiers in the window.",
+        MetricFamily.FLOWS,
+        direction="up",
+        critical=False,
+        min_scale=0.05,
+    ),
+    _volume(
+        "unique_destination_ports",
+        "ports",
+        "Distinct destination ports in the window.",
+        MetricFamily.FLOWS,
+        direction="up",
+        critical=False,
+        min_scale=0.05,
+    ),
+    _fraction(
+        "syn_only_ratio",
+        "Share of TCP flows with SYN but no ACK (connection attempts never completed).",
+        MetricFamily.FLOWS,
+        critical=False,
+        min_scale=0.005,
+    ),
+    _fraction(
+        "rst_ratio",
+        "Share of TCP flows with a RST packet (connections refused or aborted).",
+        MetricFamily.FLOWS,
+        critical=False,
+        min_scale=0.005,
+    ),
 )
 
 METRIC_REGISTRY: Mapping[str, MetricSpec] = MappingProxyType(
     {spec.name: spec for spec in CANONICAL_METRICS}
+)
+# Server metrics (simulated by the synthetic generator) and per-window flow aggregates.
+HOST_METRICS: tuple[str, ...] = tuple(
+    spec.name for spec in CANONICAL_METRICS if spec.family is not MetricFamily.FLOWS
+)
+FLOW_AGGREGATE_METRICS: tuple[str, ...] = tuple(
+    spec.name for spec in CANONICAL_METRICS if spec.family is MetricFamily.FLOWS
 )
 
 
@@ -486,6 +554,99 @@ class DataQualityEvent(StrictModel):
     end: AwareDatetime
     metrics: tuple[str, ...] = ()
     detail: str = ""
+
+
+# --------------------------------------------------------------------------------------------------
+# Alerts
+# --------------------------------------------------------------------------------------------------
+
+AlertSeverity = Literal["low", "medium", "high", "critical"]
+ExplanationMethod = Literal[
+    "metric_terms", "reconstruction_error", "occlusion_drop_one", "occlusion_keep_one"
+]
+DataQualityWarningCode = Literal[
+    "telemetry_gap",
+    "masked_cells",
+    "missing_metrics",
+    "seasonal_baseline_unavailable",
+    "unseen_entity",
+    "in_sample",
+]
+
+
+class MetricContribution(StrictModel):
+    """One metric at an alert's peak: observed value, baselines, deviation and contribution.
+
+    Values are in the metric's raw units; z-scores are in robust noise units of the metric's
+    modelling space (log1p for volumes). ``contribution`` is detector-specific (see
+    :attr:`Alert.explanation_method`): it ranks metrics by how much they drove the score, is not
+    additive across metrics and does not say that the metric *caused* anything.
+    """
+
+    metric: str
+    family: MetricFamily
+    unit: str
+    observed: float | None
+    baseline: float | None = Field(description="Median of the host's recent past (local window).")
+    seasonal_baseline: float | None = Field(
+        description="Median of the same time slot on previous days of the same day type."
+    )
+    deviation_percent: float | None = Field(
+        description="100 * (observed - baseline) / baseline; None if the baseline is 0 or unknown."
+    )
+    robust_z: float | None = Field(description="Deviation from the recent baseline (z_local).")
+    seasonal_z: float | None = Field(description="Deviation from the same-time baseline.")
+    contribution: float
+
+
+class DataQualityWarning(StrictModel):
+    """A data problem that limits how far an alert can be trusted."""
+
+    code: DataQualityWarningCode
+    message: str
+    metrics: tuple[str, ...] = ()
+
+
+class Alert(StrictModel):
+    """An explainable alert: one entity, one contiguous period of flagged observations.
+
+    ``score`` is the peak score: unitless, higher = more anomalous, **not** a probability.
+    ``reference_exceedance`` is the share of scored rows in the reference window (the validation
+    period) that scored at least as high - an empirical frequency, not a calibrated probability.
+    ``severity`` comes from rules on metric deviations and never from the score.
+    """
+
+    alert_id: str
+    entity_column: str
+    entity: str
+    start: AwareDatetime
+    fired_at: AwareDatetime
+    end: AwareDatetime
+    peak_at: AwareDatetime
+    duration_minutes: float
+    flagged_points: int
+    segment: str
+    detector: str
+    detector_version: str
+    score: float
+    threshold: float
+    threshold_scope: Literal["host", "global"]
+    threshold_strategy: str
+    reference_exceedance: float | None
+    severity: AlertSeverity
+    severity_reason: str
+    explanation_method: ExplanationMethod
+    contributions: tuple[MetricContribution, ...]
+    metric_ranking: tuple[str, ...] = Field(
+        default=(),
+        description="Every metric with a contribution, highest first.",
+    )
+    peak_deviations: dict[str, float | None] = Field(
+        description="Robust z (z_local) of every metric at the peak; None where unavailable."
+    )
+    summary: str
+    suggested_checks: tuple[str, ...]
+    data_quality: tuple[DataQualityWarning, ...]
 
 
 # --------------------------------------------------------------------------------------------------

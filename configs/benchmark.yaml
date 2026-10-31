@@ -1,0 +1,43 @@
+# Default benchmark: every detector on identical synthetic datasets (moderate preset, 5 seeds).
+# Takes a few minutes on a multi-core machine; add --skip-timing to measure quality only.
+#
+#   uv run network-anomaly benchmark --config configs/benchmark.yaml --output reports/benchmark/
+
+name: default
+presets: [moderate]
+seeds: [0, 1, 2, 3, 4]       # one independent dataset per seed; results are mean ± std
+hosts: 20
+days: 35                     # 50% train, 20% validation, 30% test (chronological, shared cuts)
+freq: 5min
+
+detectors:                   # each type at its default settings
+  - type: static_threshold
+  - type: robust_zscore
+  - type: isolation_forest
+    random_state: 0
+  - type: one_class_svm
+    random_state: 0
+
+thresholds:
+  quantile: 0.995            # for train_quantile, validation_quantile and clean_quantile
+  target_fpr: 0.005          # for target_fpr (uses validation labels)
+  per_host: true
+  operating_points: [train_quantile, validation_quantile, clean_quantile, target_fpr, fixed]
+  headline: target_fpr       # chosen before the run, never by looking at test results
+
+split:
+  train_fraction: 0.5
+  validation_fraction: 0.2
+
+alerting:
+  merge_gap: 2
+  min_points: 2
+
+matching:
+  early_tolerance: 1
+  late_tolerance: 3
+
+timing:
+  enabled: true
+  warmup: 1
+  repeats: 3

@@ -6,6 +6,7 @@ from typing import Annotated, Any
 
 from pydantic import Field
 
+from network_anomaly.detectors.autoencoder import AutoencoderConfig, AutoencoderDetector
 from network_anomaly.detectors.base import MANIFEST, Detector
 from network_anomaly.detectors.sklearn_models import (
     IsolationForestConfig,
@@ -22,7 +23,11 @@ from network_anomaly.detectors.statistical import (
 from network_anomaly.errors import ArtifactError, ConfigError
 
 DetectorConfig = Annotated[
-    StaticThresholdConfig | RobustZScoreConfig | IsolationForestConfig | OneClassSVMConfig,
+    StaticThresholdConfig
+    | RobustZScoreConfig
+    | IsolationForestConfig
+    | OneClassSVMConfig
+    | AutoencoderConfig,
     Field(discriminator="type"),
 ]
 
@@ -31,6 +36,7 @@ DETECTOR_TYPES: dict[str, tuple[type[Detector], type[Any]]] = {
     RobustZScoreDetector.name: (RobustZScoreDetector, RobustZScoreConfig),
     IsolationForestDetector.name: (IsolationForestDetector, IsolationForestConfig),
     OneClassSVMDetector.name: (OneClassSVMDetector, OneClassSVMConfig),
+    AutoencoderDetector.name: (AutoencoderDetector, AutoencoderConfig),
 }
 
 

@@ -3,13 +3,15 @@
 This module is shared by the CLI and the benchmark runner so that both follow the same rules:
 
 * features and the detector are fitted on training rows only;
-* thresholds are fitted on the segment their strategy requires, never on test rows;
+* thresholds are fitted on the segment their strategy requires, never on test rows - or, for
+  ``clean_quantile``, optionally on a known-clean copy of the validation window;
 * every output row carries its segment, so evaluation can exclude in-sample rows.
 """
 
 import json
 import logging
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Self
 
@@ -21,23 +23,24 @@ from pydantic import Field, ValidationError, model_validator
 
 from network_anomaly.config import StrictModel
 from network_anomaly.detectors import Detector, DetectorConfig, create_detector, load_detector
-from network_anomaly.errors import ArtifactError
+from network_anomaly.errors import ArtifactError, ConfigError, DataValidationError
 from network_anomaly.evaluation.splits import SplitConfig, SplitPlan, plan_split
-from network_anomaly.explanations.alerts import AlertingConfig
+from network_anomaly.explanations.alerts import AlertingConfig, assemble_alerts
 from network_anomaly.features.builder import (
     FeatureBuilder,
     FeatureConfig,
     FeatureFrame,
     FeatureState,
 )
-from network_anomaly.ingestion.validation import LabelFrame, ValidatedMetrics
+from network_anomaly.ingestion.validation import LabelFrame, MetricsFrame, ValidatedMetrics
 from network_anomaly.preprocessing import SOURCE_TIMESTAMP
-from network_anomaly.schemas import TIMESTAMP_COLUMN
+from network_anomaly.schemas import TIMESTAMP_COLUMN, Alert
 from network_anomaly.scoring.thresholds import (
     CALIBRATION_ROLE,
     FixedThresholdConfig,
     HostThresholds,
     QuantileThresholdConfig,
+    ScoreReference,
     TargetFprConfig,
     ThresholdConfig,
     fit_thresholds,
@@ -84,13 +87,17 @@ class DetectionConfig(StrictModel):
 
 @dataclass(frozen=True)
 class ModelBundle:
-    """A deployable model: feature statistics, fitted detector, thresholds and split windows."""
+    """A deployable model: feature statistics, fitted detector, thresholds and split windows.
+
+    ``reference`` summarises validation-period scores so alerts can say how rare their score was.
+    """
 
     config: DetectionConfig
     features: FeatureState
     detector: Detector
     thresholds: HostThresholds
     split: SplitPlan
+    reference: ScoreReference | None = None
 
     def save(self, directory: Path) -> None:
         directory.mkdir(parents=True, exist_ok=True)
@@ -100,6 +107,7 @@ class ModelBundle:
             "features": self.features.model_dump(mode="json"),
             "thresholds": self.thresholds.model_dump(mode="json"),
             "split": self.split.as_dict(),
+            "reference": None if self.reference is None else self.reference.model_dump(mode="json"),
         }
         (directory / BUNDLE_FILE).write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
         self.detector.save(directory / "detector")
@@ -113,12 +121,14 @@ class ModelBundle:
                     f"{directory}: unsupported bundle format {payload.get('format')}"
                 )
             split = {key: pd.Timestamp(value) for key, value in payload["split"].items()}
+            reference = payload.get("reference")
             return cls(
                 config=DetectionConfig.model_validate(payload["config"]),
                 features=FeatureState.model_validate(payload["features"]),
                 detector=load_detector(directory / "detector"),
                 thresholds=HostThresholds.model_validate(payload["thresholds"]),
                 split=SplitPlan(**split),
+                reference=None if reference is None else ScoreReference.model_validate(reference),
             )
         except (OSError, KeyError, json.JSONDecodeError, ValidationError) as exc:
             raise ArtifactError(f"cannot load model bundle from {directory}: {exc}") from exc
@@ -133,6 +143,22 @@ class DetectionResult:
     flagged: BoolArray
     segments: npt.NDArray[np.object_]
     bundle: ModelBundle
+
+    def alerts(self) -> list[Alert]:
+        """Explainable alerts for every segment (each alert records its segment)."""
+        bundle = self.bundle
+        return assemble_alerts(
+            self.features,
+            self.scores,
+            self.flagged,
+            self.segments,
+            detector=bundle.detector,
+            thresholds=bundle.thresholds,
+            feature_medians=bundle.features.feature_medians,
+            frequency=bundle.features.frequency,
+            config=bundle.config.alerting,
+            reference=bundle.reference,
+        )
 
     def segment_counts(self) -> dict[str, dict[str, int]]:
         observed = self.features.observed
@@ -162,7 +188,16 @@ def align_labels(ff: FeatureFrame, labels: LabelFrame | None) -> npt.NDArray[np.
     return merged["is_anomaly"].fillna(0).to_numpy(dtype=np.int8)
 
 
-def _calibrate(
+def _window(split: SplitPlan, role: str) -> tuple[datetime, datetime]:
+    bounds = (
+        (split.start, split.train_end)
+        if role == "train"
+        else (split.train_end, split.validation_end)
+    )
+    return bounds[0].to_pydatetime(), bounds[1].to_pydatetime()
+
+
+def calibrate(
     config: AnyThreshold,
     scores: FloatArray,
     ff: FeatureFrame,
@@ -174,39 +209,134 @@ def _calibrate(
     if role is None:
         return fit_thresholds(config, scores, ff.entities, role="train")
     rows = (segments == role) & ff.observed
-    window = (
-        (split.start, split.train_end)
-        if role == "train"
-        else (split.train_end, split.validation_end)
-    )
     return fit_thresholds(
         config,
         scores[rows],
         ff.entities[rows],
         role=role,
         labels=None if labels is None else labels[rows],
-        window=(window[0].to_pydatetime(), window[1].to_pydatetime()),
+        window=_window(split, role),
     )
 
 
-def run_detection(
-    validated: ValidatedMetrics, config: DetectionConfig, frequency: pd.Timedelta
-) -> DetectionResult:
-    """Fit features and the detector on the training segment, calibrate, score every row."""
-    metrics = validated.metrics
+@dataclass(frozen=True)
+class FittedScores:
+    """Features and a detector fitted on the training segment, with scores for every grid row."""
+
+    builder: FeatureBuilder
+    detector: Detector
+    split: SplitPlan
+    features: FeatureFrame
+    segments: npt.NDArray[np.object_]
+    scores: FloatArray
+
+    def score_other(
+        self, metrics: MetricsFrame
+    ) -> tuple[FeatureFrame, FloatArray, npt.NDArray[np.object_]]:
+        """Features, scores and segments for another dataset scored with the same fitted model."""
+        ff = self.builder.transform(metrics)
+        return ff, self.detector.score(ff), self.split.segment(ff.timestamps)
+
+
+def split_for(metrics: MetricsFrame, config: SplitConfig, frequency: pd.Timedelta) -> SplitPlan:
+    """Chronological cut times for ``metrics`` on its sampling grid."""
     grid_times = metrics.data[TIMESTAMP_COLUMN].dt.round(to_offset(frequency))
-    split = plan_split(grid_times, config.split, frequency)
+    return plan_split(grid_times, config, frequency)
+
+
+def fit_and_score(
+    metrics: MetricsFrame, config: DetectionConfig, frequency: pd.Timedelta
+) -> FittedScores:
+    """Plan the split, fit features and the detector on training rows, score every row."""
+    split = split_for(metrics, config.split, frequency)
     builder = FeatureBuilder(config.features).fit(
         metrics.until(split.train_end, frequency), frequency
     )
     ff = builder.transform(metrics)
     segments = split.segment(ff.timestamps)
     detector = create_detector(config.detector).fit(ff.select(segments == "train", "train"))
-    scores = detector.score(ff)
-    labels = align_labels(ff, validated.labels)
-    thresholds = _calibrate(config.resolved_threshold(), scores, ff, segments, split, labels)
+    return FittedScores(builder, detector, split, ff, segments, detector.score(ff))
+
+
+def calibrate_on_clean(
+    fitted: FittedScores, config: AnyThreshold, clean: ValidatedMetrics
+) -> tuple[HostThresholds, FloatArray]:
+    """Fit ``clean_quantile`` thresholds on a known-clean copy of the validation window.
+
+    Only the clean file's rows inside the validation window are used (never test-period rows);
+    its earlier rows only serve as history for the causal baselines. Returns the thresholds and
+    the clean validation scores.
+    """
+    if config.strategy != "clean_quantile":
+        raise ConfigError(
+            f"a known-clean validation file only applies to clean_quantile, not {config.strategy}",
+            hint="Use --threshold-strategy clean_quantile with --clean-validation.",
+        )
+    ff, scores, segments = fitted.score_other(clean.metrics)
+    labels = align_labels(ff, clean.labels)
+    rows = (segments == "validation") & ff.observed
+    if labels is not None and labels[rows].any():
+        raise DataValidationError(
+            f"{clean.metrics.source}: {int(labels[rows].sum())} row(s) in the validation window "
+            "are labelled anomalous; a known-clean file must not contain anomalies"
+        )
+    thresholds = fit_clean_thresholds(
+        config, ff, scores, segments, fitted.split, source=clean.metrics.source
+    )
+    return thresholds, scores[rows]
+
+
+def fit_clean_thresholds(
+    config: AnyThreshold,
+    ff: FeatureFrame,
+    scores: FloatArray,
+    segments: npt.NDArray[np.object_],
+    split: SplitPlan,
+    *,
+    source: str,
+) -> HostThresholds:
+    """Thresholds from the validation-window rows of an already scored known-clean dataset."""
+    rows = (segments == "validation") & ff.observed
+    start, end = _window(split, "validation")
+    if not np.isfinite(scores[rows]).any():
+        raise DataValidationError(
+            f"{source} has no scorable rows in the validation window "
+            f"({start.isoformat()} to {end.isoformat()})",
+            hint="Use a clean copy of the same period, e.g. <name>.clean.csv from "
+            "`generate --with-clean-twin`.",
+        )
+    thresholds = fit_thresholds(
+        config, scores[rows], ff.entities[rows], role="validation", window=(start, end)
+    )
+    return thresholds.model_copy(update={"source": "known_clean"})
+
+
+def run_detection(
+    validated: ValidatedMetrics,
+    config: DetectionConfig,
+    frequency: pd.Timedelta,
+    *,
+    clean: ValidatedMetrics | None = None,
+) -> DetectionResult:
+    """Fit features and the detector on the training segment, calibrate, score every row.
+
+    With ``clean``, ``clean_quantile`` thresholds are fitted on that known-clean copy of the
+    validation window instead of the input's own (possibly contaminated) validation rows.
+    """
+    fitted = fit_and_score(validated.metrics, config, frequency)
+    ff, segments, scores = fitted.features, fitted.segments, fitted.scores
+    threshold_config = config.resolved_threshold()
+    if clean is None:
+        labels = align_labels(ff, validated.labels)
+        thresholds = calibrate(threshold_config, scores, ff, segments, fitted.split, labels)
+        reference_scores = scores[(segments == "validation") & ff.observed]
+    else:
+        thresholds, reference_scores = calibrate_on_clean(fitted, threshold_config, clean)
     flagged = thresholds.apply(scores, ff.entities)
-    bundle = ModelBundle(config, builder.state, detector, thresholds, split)
+    reference = ScoreReference.from_scores(reference_scores, window="validation")
+    bundle = ModelBundle(
+        config, fitted.builder.state, fitted.detector, thresholds, fitted.split, reference
+    )
     return DetectionResult(ff, scores, flagged, segments, bundle)
 
 

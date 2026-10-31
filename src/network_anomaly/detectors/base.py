@@ -11,7 +11,9 @@ per row. Contract for every implementation:
   feature schema, library versions) plus a state file; ``load_detector`` verifies the manifest.
   Pickled scikit-learn state can execute code when loaded: only load models you created.
 
-Subclasses implement ``_fit``, ``_score``, ``_state`` and ``_restore``.
+Subclasses implement ``_fit``, ``_score``, ``_state`` and ``_restore``. For explanations they
+either expose exact per-metric score terms (:meth:`Detector.metric_terms`) or can score modified
+feature rows (:meth:`Detector.score_features`), see :mod:`network_anomaly.explanations.attribution`.
 """
 
 import json
@@ -33,17 +35,20 @@ from network_anomaly.errors import (
     NotFittedError,
 )
 from network_anomaly.features.builder import FeatureFrame
+from network_anomaly.schemas import ExplanationMethod
 
 logger = logging.getLogger(__name__)
 
 FloatArray = npt.NDArray[np.float64]
 BoolArray = npt.NDArray[np.bool_]
+IntArray = npt.NDArray[np.intp]
 MANIFEST = "manifest.json"
-_LIBRARIES = ("numpy", "pandas", "scikit-learn")
 
 
-def library_versions() -> dict[str, str]:
-    return {"network-anomaly-toolkit": __version__} | {name: version(name) for name in _LIBRARIES}
+def library_versions(
+    names: tuple[str, ...] = ("numpy", "pandas", "scikit-learn"),
+) -> dict[str, str]:
+    return {"network-anomaly-toolkit": __version__} | {name: version(name) for name in names}
 
 
 class Detector(ABC):
@@ -54,6 +59,8 @@ class Detector(ABC):
     default_feature_kinds: ClassVar[tuple[str, ...]] = ()
     requires_baseline: ClassVar[bool] = True
     min_training_rows: ClassVar[int] = 50
+    libraries: ClassVar[tuple[str, ...]] = ("numpy", "pandas", "scikit-learn")
+    term_method: ClassVar[ExplanationMethod] = "metric_terms"
 
     def __init__(self, config: BaseModel) -> None:
         self.config = config
@@ -65,6 +72,11 @@ class Detector(ABC):
     @property
     def is_fitted(self) -> bool:
         return self._fitted
+
+    @property
+    def input_metrics(self) -> tuple[str, ...]:
+        """Metrics whose values this detector reads (all fitted metrics unless overridden)."""
+        return self.metrics
 
     def rows(self, ff: FeatureFrame) -> BoolArray:
         """Rows this detector can score: observed, and with a ready baseline if it needs one."""
@@ -104,9 +116,22 @@ class Detector(ABC):
             scores[rows] = self._score(ff, rows)
         return scores
 
-    def matrix(self, ff: FeatureFrame, rows: BoolArray) -> FloatArray:
-        """The fitted feature columns for ``rows`` as a float64 array."""
+    def matrix(self, ff: FeatureFrame, rows: BoolArray | IntArray) -> FloatArray:
+        """The fitted feature columns for ``rows`` (a mask or positions) as a float64 array."""
         return ff.X[list(self.feature_schema)].to_numpy(dtype=np.float64)[rows]
+
+    def metric_terms(self, ff: FeatureFrame, positions: IntArray) -> FloatArray | None:
+        """(rows x metrics) terms that make up the score exactly, or None.
+
+        The score is the maximum of the terms for the statistical detectors and their sum for the
+        autoencoder (see ``term_method``). Detectors without such terms are explained by
+        occlusion.
+        """
+        return None
+
+    def score_features(self, features: FloatArray) -> FloatArray:
+        """Score feature rows given as a matrix in ``feature_schema`` order (used for occlusion)."""
+        raise NotImplementedError(f"{self.name} cannot score modified feature rows")
 
     def save(self, directory: Path) -> None:
         if not self._fitted:
@@ -118,7 +143,7 @@ class Detector(ABC):
             "config": self.config.model_dump(mode="json"),
             "feature_schema": list(self.feature_schema),
             "metrics": list(self.metrics),
-            "libraries": library_versions(),
+            "libraries": library_versions(self.libraries),
         }
         (directory / MANIFEST).write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
         self._state(directory)
@@ -131,7 +156,7 @@ class Detector(ABC):
                 f"not {self.name} v{self.version}"
             )
         saved = manifest.get("libraries", {})
-        current = library_versions()
+        current = library_versions(self.libraries)
         changed = {k: (saved.get(k), v) for k, v in current.items() if saved.get(k) != v}
         if changed:
             logger.warning(

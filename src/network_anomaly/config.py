@@ -48,6 +48,15 @@ def parse_frequency(text: str) -> pd.Timedelta:
     return frequency
 
 
+def interval_text(interval: pd.Timedelta) -> str:
+    """Short text for an interval, the inverse of :func:`parse_frequency`: 5min, 1h, 1D, 30s."""
+    seconds = interval.total_seconds()
+    for unit, size in (("D", 86_400), ("h", 3_600), ("min", 60), ("s", 1)):
+        if seconds >= size and seconds % size == 0:
+            return f"{int(seconds // size)}{unit}"
+    return str(interval)
+
+
 class StrictModel(BaseModel):
     """Immutable Pydantic model that rejects unknown fields."""
 
